@@ -50,6 +50,22 @@ From the review of #42. Each needs a test on a J208:
     `word_index << APPLE_SPI_T8010_DESC_WORD_BITS` in `spi-apple`. That
     also changes J71b touch (8-bit setting `0x0f` → `0`). Check on J71b
     before any change.
+12. Charging: the D2355 in `apple_tristar_charger` (facts in the bring-up
+    doc). The driver's PMIC side is D2365-only today: the status offset,
+    the input-limit register and the code↔mA formula (12.5 mA steps) are
+    constants, and its match table has no data. Add per-chip match data
+    under a chip compatible (status at byte 6 of the `0x80` block, limit at
+    `0x44e` in 10 mA steps, floor `0x08`), a binding update, and a
+    `t8011-j208` node: the D2355 at `0x75` as an `apple,i2c-pmic` parent,
+    the Tristar at `0x1a`, the USB port link. Each needs a J208 test:
+    - BrickID and Type-C CC sampling read an ADC on the charger's regmap;
+      J208's ADT routes BrickID to the D2400, so the driver needs a second
+      ADC source.
+    - Withdrawal on unplug uses PMU event lines from the D2365 event
+      controller; J208 has none in the kernel yet. Until then, polling the
+      `0x80` status (500 ms worked) or the D2355's IRQ 204.
+    - The Tristar mux and BC1.2 writes were never done on J208; only its
+      capability frame was read.
 
 ## Unmerged code
 
