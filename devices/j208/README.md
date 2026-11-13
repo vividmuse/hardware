@@ -66,6 +66,42 @@ From the review of #42. Each needs a test on a J208:
       `0x80` status (500 ms worked) or the D2355's IRQ 204.
     - The Tristar mux and BC1.2 writes were never done on J208; only its
       capability frame was read.
+13. GPU: T8011 in `pvr_apple` through match data. Facts are in the bring-up
+    doc. The match data needs:
+    - the firmware name;
+    - runtime window `0x90000`;
+    - 12 clusters, with the per-cluster and per-pipe register lists
+      (3D 42, TA 34);
+    - fastest state 4;
+    - the bridge 7/9 writes on every power-up;
+    - BVNC 13.7.12.2 decoded from `CORE_ID`/`CORE_REVISION`.
+
+    Beyond the match data:
+    - an `apple,t8011-a7iop-mailbox` compatible;
+    - a `t8011` GPU node whose domain keeps `ps_dwi` on, since the J208 has
+      no `dwi_bl`;
+    - an OPP table from the ADT `perf-states`.
+
+    The Mesa changes (A10X device info, vertex-shader registers in groups
+    of four, the kmsro pitch, `vkMapMemory` reuse) go to OrchardLinux/mesa.
+    The last three apply to every G9P, so check them on J71b.
+14. Speakers: four MAX98723 on I2C1 and I2C2.
+    - A MAX98723 entry in `max98927` (match data for the shifted
+      `0x21`–`0x26` block, and the enable order).
+    - T8011 MCA2/NCO2 in the S8000/T8010 MCA driver (16×16-bit TDM).
+    - I2C1 enabled in the J208 tree, with the four amps on it and on I2C2
+      and their shared reset GPIO `0x77`.
+    - The CS42L83 codec additionally needs the AOP I2S switch.
+15. Bluetooth: the J71t BCM4355C0 match entry for a J208 compatible, and a
+    UART3 node powered by D2401 GPIO0. Check whether the ADT calibration
+    and power table matter.
+16. Internal storage: `pcie-apple-h9p` port 0 on T8011, in the native
+    order:
+    - NVMe mode, then the port;
+    - the NVMMU reset polled on bit 16.
+
+    Then `apcie_nvme` in m1n1 for T8011. A port-0-only enumeration module
+    is written but has not run.
 
 ## Unmerged code
 
@@ -92,3 +128,17 @@ registers directly. Everything is preserved in the contributor's commit
 | `tests/test_j208_drivers.py` (repo root) | checks of the layout above |
 
 Get a file with `git show contrib/vividmuse-j208:devices/j208/drivers/patches/0006-j208-brcmfmac-profile.patch`.
+
+The GPU work from the later sessions (open work 13) is on the contributor's
+fork, branch
+[`j208-ram-drivers-20261113`](https://github.com/vividmuse/hardware/tree/j208-ram-drivers-20261113/j208-ram).
+It is RAM bring-up code: out-of-tree modules, a runtime OF changeset and
+device runners. It is not meant for the tree as it is.
+
+| Path on the branch | Contents |
+| --- | --- |
+| `j208-ram/gpu/pvr-t8011/0002-drm-imagination-t8011.patch` | T8011 delta on top of `drivers/gpu/0001` (per-SoC struct, bridges, cluster lists) |
+| `j208-ram/gpu/pvr-t8011/0001-j208-mailbox-t8011-only.patch` | the private mailbox copy (`apple,t8011-a7iop-mailbox`) refuses to probe outside the GFX domain |
+| `j208-ram/gpu/pvr-t8011/j208-gpu-dt.c` | runtime changeset: mailbox and GPU nodes, GFX under DWI, DWI held on |
+| `j208-ram/gpu/pvr-t8011/README.md` | every device run, with the power-off and DWI trace |
+| `j208-ram/gpu/mesa-t8011/000[1-6]-*.patch` | Mesa patches against OrchardLinux/mesa `73a49abe` |
