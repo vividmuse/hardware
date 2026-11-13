@@ -1,0 +1,68 @@
+From d2d605b0065f3425cebd613cac25167210dc63c1 Mon Sep 17 00:00:00 2001
+From: Leon <menghen@gmail.com>
+Date: Thu, 12 Nov 2026 17:58:54 +0700
+Subject: [PATCH] pvr/g9p: G9P_VS_MIN_REGS, G9P_VS_KICK_REGS, G9P_VS_VDM_REGS
+ (debug)
+
+The varying of patch 0002 did not make the A10X (T8011) draw: with it,
+vk-tri's position-only vertex shader and Zink's GL draws still leave no
+pixel (GL run 5). The vertex shaders that draw nothing have 10 registers,
+vk-tri's that draws has 14. Let the environment raise the vertex shader's
+register allocation, in the kick's DOUTU temps and VDM_STATE together or
+in one of them, to bisect it on the device.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/imagination/vulkan/pvr_arch_g9p_gfx.c | 21 +++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/src/imagination/vulkan/pvr_arch_g9p_gfx.c b/src/imagination/vulkan/pvr_arch_g9p_gfx.c
+index 8974897..c863b56 100644
+--- a/src/imagination/vulkan/pvr_arch_g9p_gfx.c
++++ b/src/imagination/vulkan/pvr_arch_g9p_gfx.c
+@@ -112,6 +112,15 @@ usc_offset(const struct pvr_device *device, const struct pvr_suballoc_bo *bo)
+    return bo->dev_addr.addr - device->heaps.usc_heap->base_addr.addr;
+ }
+ 
++/* G9P_VS_*_REGS: a register count from the environment (0 if unset) */
++static unsigned
++env_regs(const char *name)
++{
++   const char *v = getenv(name);
++
++   return v ? strtoul(v, NULL, 0) : 0;
++}
++
+ /* Kick data word 1: the USC temp count, units of 4 registers (ISA.md) */
+ static uint32_t
+ usc_temps(unsigned regs)
+@@ -559,7 +568,15 @@ PVR_PER_ARCH(g9p_graphics_pipeline_compile)(struct pvr_device *device,
+    state->vs_outputs = vs.num_outputs;
+    state->uses_discard = fs.uses_discard;
+    state->uses_fbfetch = fs.uses_fbfetch;
+-   state->vs_regs = vs.num_regs;
++   /*
++    * T8011 bisection (GL run 5): the draws whose vertex shader has 10
++    * registers drew nothing, vk-tri's (14) draw. G9P_VS_MIN_REGS raises the
++    * vertex shader's allocation in the kick's temps and VDM_STATE,
++    * G9P_VS_KICK_REGS and G9P_VS_VDM_REGS in only one of them.
++    */
++   const unsigned vs_min_regs = env_regs("G9P_VS_MIN_REGS");
++   const unsigned vs_kick_regs = MAX3(vs.num_regs, vs_min_regs, env_regs("G9P_VS_KICK_REGS"));
++   state->vs_regs = MAX3(vs.num_regs, vs_min_regs, env_regs("G9P_VS_VDM_REGS"));
+    state->num_buffers = vs.num_buffers;
+    for (unsigned i = 0; i < vs.num_buffers; i++) {
+       state->buffers[i].set = vs.buffers[i].set;
+@@ -573,7 +590,7 @@ PVR_PER_ARCH(g9p_graphics_pipeline_compile)(struct pvr_device *device,
+     * `instanced` capture), then DOUTU (CC as iPadOS's)
+     */
+    {
+-      const uint32_t data[4] = { usc_offset(device, state->vs_bo), usc_temps(vs.num_regs),
++      const uint32_t data[4] = { usc_offset(device, state->vs_bo), usc_temps(vs_kick_regs),
+                                  0, 0x80000000u | 1u << 13 | 1u };
+       const uint32_t code[4] = {
+          g9p_pds_dout(G9P_DOUTW, 0, G9P_PDS_TEMPS, 2, 0),
+-- 
+2.52.0
+

@@ -1,0 +1,8 @@
+# The Zink build image: the Vulkan build image (Containerfile, Debian trixie
+# arm64) plus what Mesa's EGL (glvnd), GBM and Wayland platform build against.
+# build-zink.sh builds it as j208-mesa-g9p:trixie-zink.
+FROM j208-mesa-g9p:trixie
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libwayland-dev wayland-protocols libwayland-egl-backend-dev \
+        libglvnd-dev libegl-dev libgles-dev \
+    && rm -rf /var/lib/apt/lists/*

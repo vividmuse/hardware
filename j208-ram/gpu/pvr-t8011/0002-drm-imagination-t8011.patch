@@ -1,0 +1,672 @@
+diff --git a/drivers/gpu/drm/imagination/Kconfig b/drivers/gpu/drm/imagination/Kconfig
+index d7f65a9..685a8f0 100644
+--- a/drivers/gpu/drm/imagination/Kconfig
++++ b/drivers/gpu/drm/imagination/Kconfig
+@@ -20,14 +20,14 @@ config DRM_POWERVR
+ 	  If "M" is selected, the module will be called powervr.
+ 
+ config DRM_POWERVR_APPLE
+-	bool "Apple A10 (T8010) GPU support"
++	bool "Apple A10 (T8010) and A10X (T8011) GPU support"
+ 	depends on DRM_POWERVR
+ 	depends on APPLE_RTKIT && (ARCH_APPLE || COMPILE_TEST)
+ 	depends on DRM_POWERVR=m || APPLE_RTKIT=y
+ 	help
+-	  Support the Rogue-based GPU of the Apple A10 (T8010), which runs
+-	  Apple's GFX firmware on an RTKit coprocessor instead of
+-	  Imagination's firmware.
++	  Support the Rogue-based GPU of the Apple A10 (T8010) and A10X
++	  (T8011), which runs Apple's GFX firmware on an RTKit coprocessor
++	  instead of Imagination's firmware.
+ 
+ 	  If in doubt, say "N".
+ 
+diff --git a/drivers/gpu/drm/imagination/pvr_apple.c b/drivers/gpu/drm/imagination/pvr_apple.c
+index 751d644..80675d4 100644
+--- a/drivers/gpu/drm/imagination/pvr_apple.c
++++ b/drivers/gpu/drm/imagination/pvr_apple.c
+@@ -1,7 +1,8 @@
+ // SPDX-License-Identifier: GPL-2.0-only OR MIT
+ /*
+- * Apple A10 (T8010) support: Rogue fixed-function hardware driven by Apple's
+- * GFX firmware instead of Imagination's.
++ * Apple A10 (T8010) and A10X (T8011) support: Rogue fixed-function hardware
++ * driven by Apple's GFX firmware instead of Imagination's. The two run the
++ * same firmware source and layout; struct pvr_apple_soc holds what differs.
+  *
+  * The firmware runs on "gfx-kf", an AppleA7IOP V2 coprocessor, and speaks RTKit
+  * through the A7IOP mailbox. It powers the Rogue core through the "Fender"
+@@ -43,6 +44,7 @@
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
++#include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_opp.h>
+ #include <linux/pm_runtime.h>
+@@ -61,13 +63,12 @@
+  * the GPU's clock and voltage steps, lowest to highest (the firmware's own
+  * DVFS writes the same register, fw 0x16d40; ours leaves it alone). The
+  * steps come from the bootloader as the GPU's OPP table, the state number
+- * as opp-level; without one the GPU runs in FENDER_PERF_STATE_MAX, T8010's
+- * fastest.
++ * as opp-level; without one the GPU runs in the SoC's fastest state
++ * (pvr_apple_soc.perf_state_max).
+  */
+ #define FENDER_POWER_STATE		0x1000
+ #define FENDER_POWER_STATE_MASK		0x1f
+ #define FENDER_POWER_REQUEST		0x10	/* | target state */
+-#define FENDER_PERF_STATE_MAX		6
+ #define FENDER_WINDOW			0x200c
+ #define FENDER_RUN			0x2048
+ #define FENDER_RUN_ENABLE		BIT(0)
+@@ -81,8 +82,10 @@
+ 
+ struct pvr_apple {
+ 	struct pvr_device *pvr_dev;
++	const struct pvr_apple_soc *soc;
+ 	void __iomem *fender;
+ 	void __iomem *iop;
++	void __iomem *bridge[2];	/* if soc->bridges */
+ 	struct j208_rtkit *rtk;
+ 
+ 	void *win;
+@@ -221,6 +224,60 @@ static struct device *apple_dev(struct pvr_apple *apple)
+ 	return from_pvr_device(apple->pvr_dev)->dev;
+ }
+ 
++const struct pvr_apple_soc pvr_apple_t8010 = {
++	.fw_name = "apple/gfx-t8010.bin",
++	.fw_runtime = PVR_APPLE_FW_RUNTIME_T8010,
++	.perf_state_max = 6,
++	.num_clusters = 6,
++};
++
++/* Its four states are the sgx node's four powered perf-states */
++const struct pvr_apple_soc pvr_apple_t8011 = {
++	.fw_name = "apple/gfx-t8011.bin",
++	.fw_runtime = PVR_APPLE_FW_RUNTIME_T8011,
++	.perf_state_max = 4,
++	.num_clusters = 12,
++	.bridges = true,
++};
++
++/*
++ * T8011's GFX fabric bridges (iOS indices 7 and 9): iOS sets them up after
++ * every power-on of the GFX domain, before the IOP is touched. The settings,
++ * then a read back of +0xc. Writing them again with the domain still on
++ * changes nothing.
++ */
++#define BRIDGE_READBACK			0xc
++#define BRIDGE_READBACK_VALUE		0xc0010005
++
++static const struct {
++	u32 offset;
++	u32 value;
++} pvr_apple_bridge_init[] = {
++	{ 0x0, 0x0000000f }, { 0xc, BRIDGE_READBACK_VALUE }, { 0x14, 0x000000ff },
++	{ 0x18, 0x000000ff }, { 0x8104, 0x3 }, { 0x8100, 0x3 },
++};
++
++/* Call with the GFX domain on, before the mailbox starts */
++static int pvr_apple_bridges_init(struct pvr_apple *apple)
++{
++	unsigned int i, j;
++	u32 val;
++
++	if (!apple->soc->bridges)
++		return 0;
++	for (i = 0; i < ARRAY_SIZE(apple->bridge); i++) {
++		for (j = 0; j < ARRAY_SIZE(pvr_apple_bridge_init); j++)
++			writel(pvr_apple_bridge_init[j].value,
++			       apple->bridge[i] + pvr_apple_bridge_init[j].offset);
++		val = readl(apple->bridge[i] + BRIDGE_READBACK);
++		if (val != BRIDGE_READBACK_VALUE) {
++			dev_err(apple_dev(apple), "GFX bridge %u reads %#x\n", i, val);
++			return -EIO;
++		}
++	}
++	return 0;
++}
++
+ static int pvr_apple_shmem_setup(void *cookie, struct j208_rtkit_shmem *bfr)
+ {
+ 	struct pvr_apple *apple = cookie;
+@@ -383,7 +440,7 @@ static void pvr_apple_opp_init(struct pvr_apple *apple)
+ 	unsigned long freq = ULONG_MAX;
+ 	struct dev_pm_opp *opp;
+ 
+-	apple->perf_state_max = FENDER_PERF_STATE_MAX;
++	apple->perf_state_max = apple->soc->perf_state_max;
+ 	if (devm_pm_opp_of_add_table(dev) || dev_pm_opp_get_opp_count(dev) <= 0)
+ 		return;
+ 	opp = dev_pm_opp_find_freq_floor(dev, &freq);
+@@ -424,20 +481,73 @@ static void pvr_apple_devfreq_start(struct pvr_apple *apple)
+ 	}
+ }
+ 
++/*
++ * RTKit starts the mailbox as it is set up, at probe, before the GPU device
++ * is powered. With bridges, the mailbox device holds the GFX domain on while
++ * they are set up and the mailbox starts; the mailbox then keeps it on.
++ */
++static struct j208_rtkit *pvr_apple_rtkit_init(struct pvr_apple *apple)
++{
++	struct device *dev = apple_dev(apple);
++	struct platform_device *mbox_pdev;
++	struct device_node *np;
++	struct j208_rtkit *rtk;
++	int err;
++
++	if (!apple->soc->bridges)
++		return devm_j208_rtkit_init(dev, apple, NULL, 0, &pvr_apple_rtkit_ops);
++
++	np = of_parse_phandle(dev->of_node, "mboxes", 0);
++	if (!np)
++		return ERR_PTR(-ENODEV);
++	mbox_pdev = of_find_device_by_node(np);
++	of_node_put(np);
++	if (!mbox_pdev)
++		return ERR_PTR(-EPROBE_DEFER);
++	if (!device_is_bound(&mbox_pdev->dev)) {
++		rtk = ERR_PTR(-EPROBE_DEFER);
++		goto put;
++	}
++	if (!mbox_pdev->dev.pm_domain) {
++		rtk = ERR_PTR(-ENODEV);
++		goto put;
++	}
++	err = pm_runtime_resume_and_get(&mbox_pdev->dev);
++	if (err) {
++		rtk = ERR_PTR(err);
++		goto put;
++	}
++	err = pvr_apple_bridges_init(apple);
++	rtk = err ? ERR_PTR(err) :
++		    devm_j208_rtkit_init(dev, apple, NULL, 0, &pvr_apple_rtkit_ops);
++	pm_runtime_put(&mbox_pdev->dev);
++put:
++	put_device(&mbox_pdev->dev);
++	return rtk;
++}
++
+ static int pvr_apple_power_init(struct pvr_device *pvr_dev)
+ {
+ 	struct device *dev = from_pvr_device(pvr_dev)->dev;
+ 	struct platform_device *pdev = to_platform_device(dev);
+ 	const struct firmware *fw;
+ 	struct pvr_apple *apple;
+-	const char *name = "apple/gfx-t8010.bin";
++	const struct pvr_apple_soc *soc = pvr_dev->device_data->apple_soc;
++	const char *name = soc->fw_name;
+ 	unsigned int i;
+ 	int err;
+ 
++	/* Every register here sits in a power domain: never probe without one */
++	if (!dev->pm_domain)
++		return dev_err_probe(dev, -ENODEV, "no power domain\n");
++	if (soc->fw_runtime >= pvr_apple_layout_init_offset())
++		return -EINVAL;
++
+ 	apple = devm_kzalloc(dev, sizeof(*apple), GFP_KERNEL);
+ 	if (!apple)
+ 		return -ENOMEM;
+ 	apple->pvr_dev = pvr_dev;
++	apple->soc = soc;
+ 	pvr_dev->apple = apple;
+ 	err = devm_mutex_init(dev, &apple->submit_lock);
+ 	if (!err)
+@@ -460,6 +570,14 @@ static int pvr_apple_power_init(struct pvr_device *pvr_dev)
+ 	apple->iop = devm_platform_ioremap_resource_byname(pdev, "iop");
+ 	if (IS_ERR(apple->iop))
+ 		return PTR_ERR(apple->iop);
++	if (soc->bridges) {
++		apple->bridge[0] = devm_platform_ioremap_resource_byname(pdev, "bridge0");
++		if (IS_ERR(apple->bridge[0]))
++			return PTR_ERR(apple->bridge[0]);
++		apple->bridge[1] = devm_platform_ioremap_resource_byname(pdev, "bridge1");
++		if (IS_ERR(apple->bridge[1]))
++			return PTR_ERR(apple->bridge[1]);
++	}
+ 
+ 	/* The firmware addresses host memory physically through its own MMU. */
+ 	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(40));
+@@ -472,13 +590,13 @@ static int pvr_apple_power_init(struct pvr_device *pvr_dev)
+ 	if (!IS_ALIGNED(apple->win_dma, SZ_16K))
+ 		return dev_err_probe(dev, -EINVAL, "firmware window %pad not 16 KiB aligned\n",
+ 				     &apple->win_dma);
+-	apple->win_next = PVR_APPLE_FW_RUNTIME;
++	apple->win_next = soc->fw_runtime;
+ 
+ 	of_property_read_string(dev->of_node, "firmware-name", &name);
+ 	err = request_firmware(&fw, name, dev);
+ 	if (err)
+ 		return dev_err_probe(dev, err, "cannot load %s\n", name);
+-	if (fw->size > PVR_APPLE_FW_RUNTIME) {
++	if (fw->size > soc->fw_runtime) {
+ 		release_firmware(fw);
+ 		return dev_err_probe(dev, -EINVAL, "%s too large\n", name);
+ 	}
+@@ -490,7 +608,7 @@ static int pvr_apple_power_init(struct pvr_device *pvr_dev)
+ 	if (!apple->fw_image)
+ 		return -ENOMEM;
+ 
+-	apple->rtk = devm_j208_rtkit_init(dev, apple, NULL, 0, &pvr_apple_rtkit_ops);
++	apple->rtk = pvr_apple_rtkit_init(apple);
+ 	if (IS_ERR(apple->rtk))
+ 		return dev_err_probe(dev, PTR_ERR(apple->rtk), "RTKit init failed\n");
+ 
+@@ -516,8 +634,14 @@ static int pvr_apple_boot(struct pvr_device *pvr_dev)
+ 	if (apple->booted)
+ 		return 0;
+ 
+-	/* The mailbox first: the firmware talks as soon as it runs */
++	/*
++	 * The mailbox first: the firmware talks as soon as it runs. Stopped,
++	 * it let the GFX domain power off: the bridges come before it.
++	 */
+ 	if (apple->rtk_idle) {
++		err = pvr_apple_bridges_init(apple);
++		if (err)
++			return err;
+ 		err = j208_rtkit_reinit(apple->rtk);
+ 		if (err)
+ 			return err;
+@@ -754,9 +878,20 @@ static void pvr_apple_switch_vm(struct pvr_apple *apple, struct pvr_vm_context *
+ 	apple->vm_root = root;
+ }
+ 
++/*
++ * The last retired compute job. The stamp holds only its low byte for
++ * certain (the scheduling token, see pvr_apple_layout_write_compute_job()),
++ * so count back from the last submitted job: at most APPLE_JOB_SLOTS are in
++ * flight. The stamp is read first, so it never runs ahead of last_seq.
++ */
+ static u32 pvr_apple_completed_seq(struct pvr_apple *apple)
+ {
+-	return heap_read32(apple, pvr_apple_layout_stamp_offset());
++	u8 low = heap_read32(apple, pvr_apple_layout_stamp_offset());
++	u32 last;
++
++	smp_rmb();
++	last = READ_ONCE(apple->last_seq);
++	return last - (u8)(last - low);
+ }
+ 
+ static int pvr_apple_wait(struct pvr_apple *apple, u32 seq, unsigned int timeout_us)
+@@ -835,7 +970,8 @@ static int pvr_apple_submit_compute(struct pvr_apple *apple, struct pvr_vm_conte
+ 		goto out_unlock;
+ 	}
+ 	pvr_apple_switch_vm(apple, vm_ctx);
+-	seq = ++apple->last_seq;
++	seq = apple->last_seq + 1;
++	WRITE_ONCE(apple->last_seq, seq);
+ 	pvr_apple_layout_write_compute_job(apple->heap, seq, stream, ctx_state);
+ 	wmb();
+ 	WRITE_ONCE(*(__le32 *)(apple->heap + pvr_apple_layout_compute_producer()),
+@@ -1282,11 +1418,11 @@ static int pvr_apple_queue_render(struct pvr_apple *apple, struct pvr_vm_context
+ 	apple->geom_pending = engine == APPLE_ENGINE_GEOM;
+ 	if (engine == APPLE_ENGINE_GEOM) {
+ 		seq = ++apple->ta_seq;
+-		pvr_apple_layout_write_ta_job(apple->heap, seq, job);
++		pvr_apple_layout_write_ta_job(apple->heap, seq, job, apple->soc->num_clusters);
+ 		producer = pvr_apple_layout_ta_producer();
+ 	} else {
+ 		seq = ++apple->frag_seq;
+-		pvr_apple_layout_write_3d_job(apple->heap, seq, job);
++		pvr_apple_layout_write_3d_job(apple->heap, seq, job, apple->soc->num_clusters);
+ 		producer = pvr_apple_layout_3d_producer();
+ 	}
+ 	wmb();
+@@ -1575,7 +1711,7 @@ static int pvr_apple_fw_restart(struct pvr_apple *apple)
+ 	/* The window as at probe: the image, zeroes after it, RTKit buffers anew */
+ 	memset(apple->win, 0, pvr_apple_layout_init_offset());
+ 	memcpy(apple->win, apple->fw_image, apple->fw_size);
+-	apple->win_next = PVR_APPLE_FW_RUNTIME;
++	apple->win_next = apple->soc->fw_runtime;
+ 	wmb();
+ 	err = pvr_apple_boot(apple->pvr_dev);
+ 	if (!err)
+@@ -1801,7 +1937,8 @@ void pvr_apple_fw_fini(struct pvr_device *pvr_dev)
+ 
+ /*
+  * Static device information. Apple's firmware carries no IMG header, so the
+- * values come from the hardware (CORE_ID: 6 clusters) and the Rogue lineage.
++ * values come from the hardware (CORE_ID: 6 clusters on T8010, 12 on T8011)
++ * and the Rogue lineage.
+  */
+ void pvr_apple_device_info_init(struct pvr_device *pvr_dev)
+ {
+@@ -1809,7 +1946,7 @@ void pvr_apple_device_info_init(struct pvr_device *pvr_dev)
+ 	pvr_dev->features.has_cdm_control_stream_format = true;
+ 	pvr_dev->features.cdm_control_stream_format = 1;
+ 	pvr_dev->features.has_num_clusters = true;
+-	pvr_dev->features.num_clusters = 6;
++	pvr_dev->features.num_clusters = pvr_dev->device_data->apple_soc->num_clusters;
+ 	pvr_dev->features.has_phys_bus_width = true;
+ 	pvr_dev->features.phys_bus_width = 40;
+ 	pvr_dev->features.has_virtual_address_space_bits = true;
+diff --git a/drivers/gpu/drm/imagination/pvr_apple.h b/drivers/gpu/drm/imagination/pvr_apple.h
+index 390bd22..554f953 100644
+--- a/drivers/gpu/drm/imagination/pvr_apple.h
++++ b/drivers/gpu/drm/imagination/pvr_apple.h
+@@ -82,7 +82,28 @@ struct pvr_apple_cmd_frag {
+ 	struct pvr_apple_frag_regs apple;
+ };
+ 
++/**
++ * struct pvr_apple_soc - What differs between the SoCs pvr_apple drives.
++ * @fw_name: firmware file, unless the device tree names one.
++ * @fw_runtime: end of the image's data and bss in the window, rounded up to
++ *              a page; the RTKit buffers are carved after it.
++ * @perf_state_max: fastest Fender power state when there is no OPP table.
++ * @num_clusters: Rogue clusters (CORE_ID[15:8]).
++ * @bridges: two GFX fabric bridges ("bridge0", "bridge1") lose their settings
++ *           with the power domain and must be set up before the IOP is used.
++ */
++struct pvr_apple_soc {
++	const char *fw_name;
++	u32 fw_runtime;
++	u32 perf_state_max;
++	u8 num_clusters;
++	bool bridges;
++};
++
+ #if IS_ENABLED(CONFIG_DRM_POWERVR_APPLE)
++extern const struct pvr_apple_soc pvr_apple_t8010;
++extern const struct pvr_apple_soc pvr_apple_t8011;
++
+ int pvr_apple_fw_init(struct pvr_device *pvr_dev);
+ void pvr_apple_fw_fini(struct pvr_device *pvr_dev);
+ struct pvr_gem_object *pvr_apple_pm_pages(struct pvr_device *pvr_dev, size_t size);
+diff --git a/drivers/gpu/drm/imagination/pvr_apple_layout.c b/drivers/gpu/drm/imagination/pvr_apple_layout.c
+index e55f6b2..0394a26 100644
+--- a/drivers/gpu/drm/imagination/pvr_apple_layout.c
++++ b/drivers/gpu/drm/imagination/pvr_apple_layout.c
+@@ -23,6 +23,11 @@
+  *   U  debug/ready flags (init+0x98), V mapping-update ring (init+0x9c)
+  */
+ 
++#include <linux/array_size.h>
++#include <linux/build_bug.h>
++#include <linux/math.h>
++#include <linux/minmax.h>
++
+ #include "pvr_apple_layout.h"
+ 
+ #define FW_VA_HEAP		0x00100000u	/* heap descriptor 0 */
+@@ -302,6 +307,22 @@ static void write_microsequence(u8 *heap, u32 useq, u32 cdm_args, u32 seq, u32 f
+ 	wr32(heap, useq + 0x7c, 2);
+ }
+ 
++/*
++ * The scheduling token of compute job @seq (command +0x274). Bits 8-14
++ * index the queue's 128 scheduling entries (44 bytes each, at queue +0x0c),
++ * and the firmware asserts ("DAG: Non Sequential Stamp Updates") unless each
++ * command of a channel takes the entry after the previous one, mod 128. It
++ * starts again from the arriving command's entry only once the channel was
++ * idle, so jobs in flight need consecutive entries: a bare @seq gives every
++ * job below 256 entry 0, which crashed the T8011 firmware on the second of
++ * two queued jobs. The low byte stays @seq's: the completion stamp carries
++ * it, and the driver takes the job from it.
++ */
++static u32 sched_token(u32 seq)
++{
++	return (seq & 0x7f) << 8 | (seq & 0xff);
++}
++
+ static void write_compute_command(u8 *heap, u32 cmd, u32 useq, u32 seq)
+ {
+ 	wr32(heap, cmd + 0x000, 3);
+@@ -309,7 +330,7 @@ static void write_compute_command(u8 *heap, u32 cmd, u32 useq, u32 seq)
+ 	wr32(heap, cmd + 0x1e8, fw_va(useq));
+ 	wr32(heap, cmd + 0x1ec, 0x80);			/* microsequence size */
+ 	wr32(heap, cmd + 0x26c, fw_va(HEAP_STAMP + 4));	/* host stamp address */
+-	wr32(heap, cmd + 0x274, seq);			/* stamp value */
++	wr32(heap, cmd + 0x274, sched_token(seq));	/* scheduling token */
+ }
+ 
+ static void build_compute_command(u8 *heap)
+@@ -418,12 +439,20 @@ void pvr_apple_layout_build_ta(u8 *heap)
+ #define TA_STAMP		0x80	/* completion stamp the finalize step writes */
+ #define TA_SLOT			1	/* scheduling slot; compute uses 0 */
+ 
++/*
++ * Geometry's 64-bit block as the firmware reads it (T8010 0xa8c0, T8011
++ * 0xae70): 22 registers, then 0x11030 once per cluster.
++ */
++#define TA_REGS64_FIXED		22
++
+ /*
+  * Queue geometry job @seq: one parameter-manager slot, StartTA, wait for
+  * TA_FINISHED / TA_TERMINATE / PM_OUT_OF_MEMORY, FinalizeTA, End. Finalize
+  * writes @seq to the geometry stamp (pvr_apple_layout_ta_stamp_offset()).
++ * @clusters: the GPU's clusters, which the per-cluster registers follow.
+  */
+-void pvr_apple_layout_write_ta_job(u8 *heap, u32 seq, const struct pvr_apple_ta_job *job)
++void pvr_apple_layout_write_ta_job(u8 *heap, u32 seq, const struct pvr_apple_ta_job *job,
++				   unsigned int clusters)
+ {
+ 	u32 cmd = HEAP_TA_CMD, useq = HEAP_TA_USEQ, sc = HEAP_TA_SCRATCH;
+ 	u32 fl = HEAP_TA_FREE_LIST, slot = HEAP_TA_PM_SLOT;
+@@ -434,8 +463,14 @@ void pvr_apple_layout_write_ta_job(u8 *heap, u32 seq, const struct pvr_apple_ta_
+ 		heap[i] = 0;
+ 	for (i = 0; i < 8; i++)
+ 		wr32(heap, HEAP_TA_REGS32 + 4 * i, job->regs32[i]);
+-	for (i = 0; i < 28; i++)
++	BUILD_BUG_ON(TA_REGS64_FIXED + PVR_APPLE_REG_CLUSTERS != ARRAY_SIZE(job->regs64));
++	BUILD_BUG_ON(HEAP_TA_REGS64 + 8 * (TA_REGS64_FIXED + PVR_APPLE_MAX_CLUSTERS) >
++		     HEAP_TA_SCRATCH);
++	for (i = 0; i < TA_REGS64_FIXED; i++)
+ 		wr64(heap, HEAP_TA_REGS64 + 8 * i, job->regs64[i]);
++	for (i = 0; i < clusters; i++)
++		wr64(heap, HEAP_TA_REGS64 + 8 * (TA_REGS64_FIXED + i),
++		     job->regs64[TA_REGS64_FIXED + i % PVR_APPLE_REG_CLUSTERS]);
+ 	wr32(heap, sc + TA_CANCEL, 0xffffffff);
+ 	wr32(heap, sc + TA_CANCEL + 4, 0xffffffff);
+ 
+@@ -542,6 +577,32 @@ void pvr_apple_layout_build_3d(u8 *heap)
+ #define F_STAMP			0x80
+ #define F_SLOT			2
+ 
++/*
++ * Expand the fragment job's 64-bit block (T8010's order) for @clusters into
++ * @out, as the firmware reads it (T8010 0xb7fc, T8011 0xbea4): 0xfa8, 0xfb0,
++ * 0xfb8, then 0xfc0 once per pixel pipe (a pipe per 4 clusters), 0xf48 ...
++ * 0xf30, 0x11020 and 0x11080 once per cluster each, and 0xfd0.
++ * Return: the number of entries.
++ */
++static unsigned int frag_regs64(const u64 *in, unsigned int clusters, u64 *out)
++{
++	const unsigned int pipes = DIV_ROUND_UP(clusters, 4);
++	unsigned int i, n = 0;
++
++	for (i = 0; i < 3; i++)
++		out[n++] = in[i];
++	for (i = 0; i < pipes; i++)
++		out[n++] = in[3 + min(i, 1u)];		/* the same value per pipe */
++	for (i = 5; i < 16; i++)
++		out[n++] = in[i];
++	for (i = 0; i < clusters; i++)
++		out[n++] = in[16 + i % PVR_APPLE_REG_CLUSTERS];
++	for (i = 0; i < clusters; i++)
++		out[n++] = in[22 + i % PVR_APPLE_REG_CLUSTERS];
++	out[n++] = in[28];
++	return n;
++}
++
+ /*
+  * Queue fragment job @seq on the geometry job's parameter-manager slot:
+  * Start3D, wait for PIXELBE_END_RENDER, Finalize3D, End. Finalize writes @seq
+@@ -549,19 +610,24 @@ void pvr_apple_layout_build_3d(u8 *heap)
+  * holds its register blocks itself, at +0x68 (64-bit) and +0x3b0 (32-bit),
+  * as the iPadOS kext lays it out.
+  */
+-void pvr_apple_layout_write_3d_job(u8 *heap, u32 seq, const struct pvr_apple_3d_job *job)
++void pvr_apple_layout_write_3d_job(u8 *heap, u32 seq, const struct pvr_apple_3d_job *job,
++				   unsigned int clusters)
+ {
++	u64 regs64[3 + 3 + 11 + 2 * PVR_APPLE_MAX_CLUSTERS + 1];
+ 	u32 cmd = HEAP_3D_CMD, useq = HEAP_3D_USEQ, sc = HEAP_3D_SCRATCH;
+ 	u32 work = HEAP_3D_RING + ((seq - 1) % RING_ENTRIES) * WORK_ENTRY_SIZE;
+ 	u32 units = fw_va(HEAP_3D_UNITS) + 8, slot = fw_va(HEAP_TA_PM_SLOT);
+-	u32 i;
++	u32 i, n;
+ 
++	BUILD_BUG_ON(ARRAY_SIZE(job->regs64) != 16 + 2 * PVR_APPLE_REG_CLUSTERS + 1);
++	BUILD_BUG_ON(0x68 + sizeof(regs64) > 0x3b0);	/* up to the 32-bit block */
++	n = frag_regs64(job->regs64, clusters, regs64);
+ 	for (i = HEAP_3D_CMD; i < HEAP_3D_CONTEXT + 0x100; i++)
+ 		heap[i] = 0;
+ 	for (i = 0; i < 18; i++)
+ 		wr32(heap, cmd + 0x3b0 + 4 * i, job->regs32[i]);
+-	for (i = 0; i < 29; i++)
+-		wr64(heap, cmd + 0x68 + 8 * i, job->regs64[i]);
++	for (i = 0; i < n; i++)
++		wr64(heap, cmd + 0x68 + 8 * i, regs64[i]);
+ 	wr32(heap, sc + F_CANCEL, 0xffffffff);
+ 	wr32(heap, sc + F_CANCEL + 4, 0xffffffff);
+ 
+diff --git a/drivers/gpu/drm/imagination/pvr_apple_layout.h b/drivers/gpu/drm/imagination/pvr_apple_layout.h
+index 8fa529b..7f4bc74 100644
+--- a/drivers/gpu/drm/imagination/pvr_apple_layout.h
++++ b/drivers/gpu/drm/imagination/pvr_apple_layout.h
+@@ -7,7 +7,9 @@
+ #include <linux/types.h>
+ 
+ #define PVR_APPLE_WINDOW_SIZE	0x100000u	/* IOP window: image, RTKit, init */
+-#define PVR_APPLE_FW_RUNTIME	0x8f000u	/* image + firmware runtime data */
++/* Image + firmware runtime data: RTKit buffers follow (per SoC, pvr_apple_soc) */
++#define PVR_APPLE_FW_RUNTIME_T8010	0x8f000u
++#define PVR_APPLE_FW_RUNTIME_T8011	0x90000u	/* G9G data/bss ends at 0x8ff04 */
+ #define PVR_APPLE_HEAP_SIZE	0x400000u
+ 
+ /*
+@@ -20,6 +22,15 @@ void pvr_apple_layout_build(u8 *win, u64 win_pa, u8 *heap, u64 heap_pa, u64 gpu_
+ /* GPU virtual addresses the compute command and its CDM arguments use */
+ #define PVR_APPLE_GPU_DATA	0x200000ull	/* stream at +0, PDS HALT at +0x1000 */
+ void pvr_apple_layout_write_compute_job(u8 *heap, u32 seq, u64 stream, u64 ctx_state);
++/*
++ * The register blocks below are in T8010's order, with one entry per cluster
++ * for its 6 clusters. The writers expand them for the SoC: T8011's firmware
++ * (12 clusters, 3 pixel pipes) reads one per cluster and pipe it has. Every
++ * cluster takes the same value, so cluster c gets entry c % 6.
++ */
++#define PVR_APPLE_REG_CLUSTERS	6
++#define PVR_APPLE_MAX_CLUSTERS	12
++
+ /* A geometry (TA) job; see pvr_apple_layout_write_ta_job() */
+ struct pvr_apple_ta_job {
+ 	u32 regs32[8];		/* RGX 0xc78, 0xc88, 0xc98, 0xc18, 0xc08, 0xc10, 0xc20, 0xc28 */
+@@ -31,7 +42,8 @@ struct pvr_apple_ta_job {
+ };
+ 
+ void pvr_apple_layout_build_ta(u8 *heap);
+-void pvr_apple_layout_write_ta_job(u8 *heap, u32 seq, const struct pvr_apple_ta_job *job);
++void pvr_apple_layout_write_ta_job(u8 *heap, u32 seq, const struct pvr_apple_ta_job *job,
++				   unsigned int clusters);
+ u32 pvr_apple_layout_ta_producer(void);
+ u32 pvr_apple_layout_ta_stamp_offset(void);
+ u32 pvr_apple_layout_ta_units_offset(void);
+@@ -45,7 +57,8 @@ struct pvr_apple_3d_job {
+ };
+ 
+ void pvr_apple_layout_build_3d(u8 *heap);
+-void pvr_apple_layout_write_3d_job(u8 *heap, u32 seq, const struct pvr_apple_3d_job *job);
++void pvr_apple_layout_write_3d_job(u8 *heap, u32 seq, const struct pvr_apple_3d_job *job,
++				   unsigned int clusters);
+ u32 pvr_apple_layout_3d_producer(void);
+ u32 pvr_apple_layout_ring_indices_offset(unsigned int ring);
+ u32 pvr_apple_layout_3d_stamp_offset(void);
+diff --git a/drivers/gpu/drm/imagination/pvr_device.c b/drivers/gpu/drm/imagination/pvr_device.c
+index af1a61b..82c9357 100644
+--- a/drivers/gpu/drm/imagination/pvr_device.c
++++ b/drivers/gpu/drm/imagination/pvr_device.c
+@@ -425,7 +425,15 @@ pvr_gpuid_decode_reg(const struct pvr_device *pvr_dev, struct pvr_gpu_id *gpu_id
+ 	 * Try reading the BVNC using the newer (cleaner) method first. If the
+ 	 * B value is zero, fall back to the older method.
+ 	 */
+-	u64 bvnc = pvr_cr_read64(pvr_dev, ROGUE_CR_CORE_ID__PBVNC);
++	u64 bvnc = 0;
++
++	/*
++	 * Apple: decode from CORE_REVISION and CORE_ID only. On T8011 those
++	 * two are the RGX registers read so far (+0x20, +0x18); the 64-bit
++	 * PBVNC read would also touch +0x24.
++	 */
++	if (!pvr_device_is_apple(pvr_dev))
++		bvnc = pvr_cr_read64(pvr_dev, ROGUE_CR_CORE_ID__PBVNC);
+ 
+ 	gpu_id->b = PVR_CR_FIELD_GET(bvnc, CORE_ID__PBVNC__BRANCH_ID);
+ 	if (gpu_id->b != 0) {
+@@ -541,6 +549,7 @@ pvr_gpu_support_level(const struct pvr_gpu_id *gpu_id)
+ 		return PVR_GPU_SUPPORTED;
+ 
+ 	case PVR_PACKED_BVNC(13, 10, 6, 2):	/* Apple A10 (T8010) */
++	case PVR_PACKED_BVNC(13, 7, 12, 2):	/* Apple A10X (T8011) */
+ 		return PVR_GPU_EXPERIMENTAL;
+ 
+ 	default:
+diff --git a/drivers/gpu/drm/imagination/pvr_device.h b/drivers/gpu/drm/imagination/pvr_device.h
+index 41272c0..073fce7 100644
+--- a/drivers/gpu/drm/imagination/pvr_device.h
++++ b/drivers/gpu/drm/imagination/pvr_device.h
+@@ -71,6 +71,9 @@ struct pvr_device_data {
+ 
+ 	/** @apple_fw: GPU driven by Apple's GFX firmware (see pvr_apple.c). */
+ 	bool apple_fw;
++
++	/** @apple_soc: SoC differences, if @apple_fw. */
++	const struct pvr_apple_soc *apple_soc;
+ };
+ 
+ struct pvr_apple;
+diff --git a/drivers/gpu/drm/imagination/pvr_drv.c b/drivers/gpu/drm/imagination/pvr_drv.c
+index 02c4f85..df8b847 100644
+--- a/drivers/gpu/drm/imagination/pvr_drv.c
++++ b/drivers/gpu/drm/imagination/pvr_drv.c
+@@ -1500,6 +1500,13 @@ static const struct pvr_device_data pvr_device_data_pwrseq = {
+ static const struct pvr_device_data pvr_device_data_apple = {
+ 	.pwr_ops = &pvr_power_sequence_ops_apple,
+ 	.apple_fw = true,
++	.apple_soc = &pvr_apple_t8010,
++};
++
++static const struct pvr_device_data pvr_device_data_apple_t8011 = {
++	.pwr_ops = &pvr_power_sequence_ops_apple,
++	.apple_fw = true,
++	.apple_soc = &pvr_apple_t8011,
+ };
+ #endif
+ 
+@@ -1509,6 +1516,10 @@ static const struct of_device_id dt_match[] = {
+ 		.compatible = "apple,t8010-gpu",
+ 		.data = &pvr_device_data_apple,
+ 	},
++	{
++		.compatible = "apple,t8011-gpu",
++		.data = &pvr_device_data_apple_t8011,
++	},
+ #endif
+ 	{
+ 		.compatible = "thead,th1520-gpu",
+diff --git a/drivers/gpu/drm/imagination/pvr_power.c b/drivers/gpu/drm/imagination/pvr_power.c
+index 57f4994..6e7355c 100644
+--- a/drivers/gpu/drm/imagination/pvr_power.c
++++ b/drivers/gpu/drm/imagination/pvr_power.c
+@@ -639,6 +639,15 @@ int pvr_power_domains_init(struct pvr_device *pvr_dev)
+ 
+ 	domain_count = of_count_phandle_with_args(dev->of_node, "power-domains",
+ 						  "#power-domain-cells");
++	/*
++	 * No property, but a domain all the same: J208's GFX domain has no
++	 * phandle, so j208-gpu-dt adds the device to it before probe.
++	 */
++	if (domain_count == -ENOENT && dev->pm_domain) {
++		err = 0;
++		goto out;
++	}
++
+ 	if (domain_count < 0) {
+ 		err = domain_count;
+ 		goto out;

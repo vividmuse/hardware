@@ -1,0 +1,53 @@
+From f7d65d733187fa7d18df97728181f018cee5d750 Mon Sep 17 00:00:00 2001
+From: Leon <menghen@gmail.com>
+Date: Mon, 9 Nov 2026 22:41:00 +0700
+Subject: [PATCH] pvr/g9p: give vertex shaders without varyings one (A10X draws
+ nothing otherwise)
+
+On the A10X (T8011) a draw whose vertex shader writes only the position
+leaves no pixel: vk-tri with such a shader draws nothing with a constant,
+push-constant or uniform-buffer colour, while the same fragment shaders
+behind a vertex shader with one varying they ignore draw. Zink's GL draws
+without varyings hit this. Write varying 0 from an output register in that
+case, as those shaders do.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/imagination/g9p/g9p_compile.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/src/imagination/g9p/g9p_compile.c b/src/imagination/g9p/g9p_compile.c
+index 224bb086..21b91ac8 100644
+--- a/src/imagination/g9p/g9p_compile.c
++++ b/src/imagination/g9p/g9p_compile.c
+@@ -1959,6 +1959,26 @@ generate(struct g9p_ctx *ctx, nir_function_impl *impl, unsigned st)
+          fprintf(stderr, "g9p: vertex shader without outputs\n");
+          return false;
+       }
++      /*
++       * A draw whose vertex shader writes no varying produces no pixels on
++       * the A10X (T8011): vk-tri with a vertex shader writing only the
++       * position draws nothing, whether the fragment colour is a constant,
++       * a push constant or a uniform, and the same shaders with one varying
++       * the fragment shader ignores draw. Such a shader writes varying 0
++       * (four copies of an output register) ahead of the position, as
++       * those do, so the draw has the W iterate and one varying.
++       */
++      if (!ctx->out->num_varyings) {
++         const int r = ctx->outputs[ctx->num_outputs - 1].reg;
++
++         memmove(&ctx->outputs[4], &ctx->outputs[0], ctx->num_outputs * sizeof(ctx->outputs[0]));
++         for (unsigned c = 0; c < 4; c++) {
++            ctx->outputs[c].reg = r;
++            ctx->outputs[c].slot = 4 + c;
++         }
++         ctx->num_outputs += 4;
++         ctx->out->num_varyings = 1;
++      }
+       for (unsigned i = 0; i + 1 < ctx->num_outputs; i++)
+          g9p_vs_output(ctx->c, ctx->outputs[i].reg, ctx->outputs[i].slot);
+       g9p_end_vertex(ctx->c, ctx->outputs[ctx->num_outputs - 1].reg,
+-- 
+2.52.0
+

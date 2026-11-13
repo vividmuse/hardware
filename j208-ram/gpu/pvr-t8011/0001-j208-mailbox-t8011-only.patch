@@ -1,0 +1,77 @@
+diff --git a/drivers/soc/apple/mailbox.c b/drivers/soc/apple/mailbox.c
+index 20690d0..df0f732 100644
+--- a/drivers/soc/apple/mailbox.c
++++ b/drivers/soc/apple/mailbox.c
+@@ -417,6 +417,14 @@ static int j208_mbox_probe(struct platform_device *pdev)
+ 	if (!mbox)
+ 		return -ENOMEM;
+ 
++	/*
++	 * J208 has no phandle for the GFX power domain: j208-gpu-dt adds this
++	 * device to it before any driver binds. Without it, the first register
++	 * access would hit a gated block.
++	 */
++	if (!dev->pm_domain)
++		return dev_err_probe(dev, -ENODEV, "not in the GFX power domain\n");
++
+ 	mbox->dev = &pdev->dev;
+ 	mbox->hw = of_device_get_match_data(dev);
+ 	if (!mbox->hw)
+@@ -467,7 +475,7 @@ static int j208_mbox_probe(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
+-static const struct j208_mbox_hw j208_mbox_t8015_hw = {
++static const struct j208_mbox_hw j208_mbox_t8015_hw __maybe_unused = {
+ 	.control_full = APPLE_ASC_MBOX_CONTROL_FULL,
+ 	.control_empty = APPLE_ASC_MBOX_CONTROL_EMPTY,
+ 
+@@ -504,7 +512,7 @@ static const struct j208_mbox_hw j208_mbox_a7iop_hw = {
+ 	.irq_bit_send_empty = APPLE_A7IOP_MBOX_IRQ_A2I_EMPTY,
+ };
+ 
+-static const struct j208_mbox_hw j208_mbox_asc_hw = {
++static const struct j208_mbox_hw j208_mbox_asc_hw __maybe_unused = {
+ 	.control_full = APPLE_ASC_MBOX_CONTROL_FULL,
+ 	.control_empty = APPLE_ASC_MBOX_CONTROL_EMPTY,
+ 
+@@ -519,7 +527,7 @@ static const struct j208_mbox_hw j208_mbox_asc_hw = {
+ 	.has_irq_controls = false,
+ };
+ 
+-static const struct j208_mbox_hw j208_mbox_m3_hw = {
++static const struct j208_mbox_hw j208_mbox_m3_hw __maybe_unused = {
+ 	.control_full = APPLE_M3_MBOX_CONTROL_FULL,
+ 	.control_empty = APPLE_M3_MBOX_CONTROL_EMPTY,
+ 
+@@ -538,18 +546,19 @@ static const struct j208_mbox_hw j208_mbox_m3_hw = {
+ 	.irq_bit_send_empty = APPLE_M3_MBOX_IRQ_A2I_EMPTY,
+ };
+ 
++/*
++ * J208 private copy: only the T8011 GFX mailbox, which j208-gpu-dt creates.
++ * The kernel's own apple-mailbox keeps every other mailbox.
++ */
+ static const struct of_device_id j208_mbox_of_match[] = {
+-	{ .compatible = "apple,asc-mailbox-v4", .data = &j208_mbox_asc_hw },
+-	{ .compatible = "apple,t8015-asc-mailbox", .data = &j208_mbox_t8015_hw },
+-	{ .compatible = "apple,t8010-a7iop-mailbox", .data = &j208_mbox_a7iop_hw },
+-	{ .compatible = "apple,m3-mailbox-v2", .data = &j208_mbox_m3_hw },
++	{ .compatible = "apple,t8011-a7iop-mailbox", .data = &j208_mbox_a7iop_hw },
+ 	{}
+ };
+ MODULE_DEVICE_TABLE(of, j208_mbox_of_match);
+ 
+ static struct platform_driver j208_mbox_driver = {
+ 	.driver = {
+-		.name = "apple-mailbox",
++		.name = "j208-gfx-mailbox",
+ 		.of_match_table = j208_mbox_of_match,
+ 	},
+ 	.probe = j208_mbox_probe,
+@@ -558,4 +567,4 @@ module_platform_driver(j208_mbox_driver);
+ 
+ MODULE_LICENSE("Dual MIT/GPL");
+ MODULE_AUTHOR("Sven Peter <sven@svenpeter.dev>");
+-MODULE_DESCRIPTION("Apple Mailbox driver");
++MODULE_DESCRIPTION("Apple Mailbox driver (J208 GFX private copy)");

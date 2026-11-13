@@ -1,0 +1,145 @@
+From e2bfb0e338016605c8b660ebdb29f62af6db9dfc Mon Sep 17 00:00:00 2001
+From: Leon <menghen@gmail.com>
+Date: Mon, 9 Nov 2026 12:43:30 +0700
+Subject: [PATCH] pvr: Apple A10X (T8011), BVNC 13.7.12.2
+
+The A10's GPU with 12 clusters. Every other value is the A10's.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../common/device_info/apple-a10x.h           | 93 +++++++++++++++++++
+ src/imagination/common/pvr_device_info.c      |  3 +
+ 2 files changed, 96 insertions(+)
+ create mode 100644 src/imagination/common/device_info/apple-a10x.h
+
+diff --git a/src/imagination/common/device_info/apple-a10x.h b/src/imagination/common/device_info/apple-a10x.h
+new file mode 100644
+index 0000000..6b617a9
+--- /dev/null
++++ b/src/imagination/common/device_info/apple-a10x.h
+@@ -0,0 +1,93 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++/*
++ * Apple A10X GPU (T8011, iPad Pro 10.5/12.9 2nd gen, Apple TV 4K): the A10's
++ * GPU with 12 clusters (CORE_ID 0x011b0c02) instead of 6. BVNC 13.7.12.2 as
++ * the kernel decodes CORE_ID and CORE_REVISION. Its firmware (G9G) shares
++ * the A10's (G9P) command formats; the shader ISA is the same.
++ *
++ * Everything but the cluster count is the A10's (apple-a10.h): established
++ * there, or a GX6650 placeholder, and not verified on the A10X.
++ */
++
++#ifndef APPLE_A10X_H
++#define APPLE_A10X_H
++
++#include <stdbool.h>
++
++#include "pvr_device_info.h"
++
++#define PVR_DEVICE_IDENT_13_V_12_2 \
++   .device_id = 0x8011, .series_name = "Apple", \
++   .public_name = "A10X", .arch = PVR_DEVICE_ARCH_ROGUE
++
++static const struct pvr_device_features pvr_device_features_13_V_12_2 = {
++   .has_apple_g9p = true,
++   .has_compute = true,                 /* A10 */
++   .has_isp_samples_per_pixel = true,   /* A10 */
++   .has_num_clusters = true,            /* A10 */
++   .has_tile_size_x = true,             /* A10 */
++   .has_tile_size_y = true,             /* A10 */
++
++   /* GX6650 placeholders */
++   .has_cluster_grouping = true,
++   .has_common_store_size_in_dwords = true,
++   .has_isp_max_tiles_in_flight = true,
++   .has_max_instances_per_pds_task = true,
++   .has_max_multisample = true,
++   .has_max_partitions = true,
++   .has_max_usc_tasks = true,
++   .has_num_raster_pipes = true,
++   .has_slc_cache_line_size_bits = true,
++   .has_slc_mcu_cache_controls = true,
++   .has_unified_store_depth = true,
++   .has_usc_min_output_registers_per_pix = true,
++   .has_usc_slots = true,
++   .has_uvs_banks = true,
++   .has_uvs_pba_entries = true,
++   .has_uvs_vtx_entries = true,
++   .has_vdm_cam_size = true,
++   .has_xt_top_infrastructure = true,
++
++   .isp_samples_per_pixel = 2U,         /* A10: TE_AA 1/5/7 (iOS 10 kext) */
++   .num_clusters = 12U,                 /* A10X: CORE_ID 0x011b0c02 */
++   .tile_size_x = 32U,                  /* A10 */
++   .tile_size_y = 32U,                  /* A10 */
++
++   .common_store_size_in_dwords = 1280U * 4U * 4U,
++   .isp_max_tiles_in_flight = 8U,
++   .max_instances_per_pds_task = 32U,
++   .max_multisample = 8U,
++   .max_partitions = 8U,
++   .max_usc_tasks = 56U,
++   .num_raster_pipes = 2U,
++   .slc_cache_line_size_bits = 512U,
++   .unified_store_depth = 256U,
++   .usc_min_output_registers_per_pix = 2U,
++   .usc_slots = 32U,
++   .uvs_banks = 8U,
++   .uvs_pba_entries = 320U,
++   .uvs_vtx_entries = 288U,
++   .vdm_cam_size = 256U,
++};
++
++static const struct pvr_device_enhancements pvr_device_enhancements_13_7_12_2 = { 0 };
++
++static const struct pvr_device_quirks pvr_device_quirks_13_7_12_2 = { 0 };
++
++static const struct pvr_device_info pvr_device_info_13_7_12_2 = {
++   .ident = {
++      PVR_DEVICE_IDENT_13_V_12_2,
++      .b = 13,
++      .v = 7,
++      .n = 12,
++      .c = 2,
++   },
++   .features = pvr_device_features_13_V_12_2,
++   .enhancements = pvr_device_enhancements_13_7_12_2,
++   .quirks = pvr_device_quirks_13_7_12_2,
++};
++
++#endif /* APPLE_A10X_H */
+diff --git a/src/imagination/common/pvr_device_info.c b/src/imagination/common/pvr_device_info.c
+index c5cff25..cd7610f 100644
+--- a/src/imagination/common/pvr_device_info.c
++++ b/src/imagination/common/pvr_device_info.c
+@@ -42,6 +42,7 @@
+ #include "device_info/bxm-4-64.h"
+ #include "device_info/bxs-4-64.h"
+ #include "device_info/apple-a10.h"
++#include "device_info/apple-a10x.h"
+ 
+ #include "util/u_string.h"
+ 
+@@ -51,6 +52,7 @@ static const struct pvr_device_info *device_infos[] = {
+    &pvr_device_info_4_45_2_58,
+    &pvr_device_info_4_46_6_62,
+    &pvr_device_info_5_9_1_46,
++   &pvr_device_info_13_7_12_2,
+    &pvr_device_info_13_10_6_2,
+    &pvr_device_info_15_5_1_64,
+    &pvr_device_info_22_67_54_30,
+@@ -86,6 +88,7 @@ int pvr_device_info_init(struct pvr_device_info *info, uint64_t bvnc)
+       CASE_PACKED_BVNC_DEVICE_INFO(4, 45, 2, 58);
+       CASE_PACKED_BVNC_DEVICE_INFO(4, 46, 6, 62);
+       CASE_PACKED_BVNC_DEVICE_INFO(5, 9, 1, 46);
++      CASE_PACKED_BVNC_DEVICE_INFO(13, 7, 12, 2);
+       CASE_PACKED_BVNC_DEVICE_INFO(13, 10, 6, 2);
+       CASE_PACKED_BVNC_DEVICE_INFO(15, 5, 1, 64);
+       CASE_PACKED_BVNC_DEVICE_INFO(22, 67, 54, 30);
+-- 
+2.52.0
+

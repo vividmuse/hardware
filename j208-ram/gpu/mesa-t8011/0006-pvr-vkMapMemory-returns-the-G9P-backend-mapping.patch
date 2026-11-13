@@ -1,0 +1,87 @@
+From 74d9bc796933c1961b38fcb4921d13816c5b539e Mon Sep 17 00:00:00 2001
+From: Leon <menghen@gmail.com>
+Date: Thu, 12 Nov 2026 22:20:28 +0700
+Subject: [PATCH] pvr: vkMapMemory returns the mapping the G9P backend made
+
+The G9P backend's CPU copies map device memory through g9p_cpu_addr()
+and keep it mapped. A later vkMapMemory of the same memory then fails
+with VK_ERROR_MEMORY_MAP_FAILED ("Memory object already mapped"). Zink
+logged vkMapMemory failures while a Labwc desktop ran on the J208, and
+this is the likely cause. Return the existing mapping instead; a placed
+map replaces it.
+
+With G9P_TRACE set, each map that got the backend's mapping, and each
+map that failed (with its errno), goes to stderr, so a desktop's log
+shows which case it hit.
+
+Generated-by: LLM
+---
+ src/imagination/vulkan/pvr_device.c | 28 ++++++++++++++++++++++++----
+ 1 file changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/src/imagination/vulkan/pvr_device.c b/src/imagination/vulkan/pvr_device.c
+index 5f0b7ca..bdb6cc5 100644
+--- a/src/imagination/vulkan/pvr_device.c
++++ b/src/imagination/vulkan/pvr_device.c
+@@ -30,6 +30,7 @@
+ #include "pvr_device.h"
+ 
+ #include <assert.h>
++#include <errno.h>
+ #include <fcntl.h>
+ #include <inttypes.h>
+ #include <stdbool.h>
+@@ -44,6 +45,7 @@
+ #include "hwdef/rogue_hw_utils.h"
+ #include "pvr_bo.h"
+ #include "vk_debug_utils.h"
++#include "vk_enum_to_str.h"
+ #include "pvr_buffer.h"
+ #include "pvr_entrypoints.h"
+ #include "pvr_framebuffer.h"
+@@ -443,11 +445,23 @@ VkResult pvr_MapMemory2(VkDevice _device,
+    /* From the Vulkan 1.2.194 spec:
+     *
+     *    "memory must not be currently host mapped"
++    *
++    * The G9P backend maps memory itself, and keeps it mapped, when it copies
++    * on the CPU (g9p_cpu_addr()): an application's later map of the same
++    * memory gets that mapping. A placed map replaces it. G9P_TRACE=1 tells
++    * of each such map, and of a map that failed.
+     */
+    if (mem->bo->map != NULL) {
+-      return vk_errorf(device,
+-                       VK_ERROR_MEMORY_MAP_FAILED,
+-                       "Memory object already mapped.");
++      if (!addr) {
++         if (getenv("G9P_TRACE"))
++            fprintf(stderr, "g9p: vkMapMemory of %" PRIu64 " bytes got the backend's mapping\n",
++                    (uint64_t)mem->bo->size);
++         *ppData = (uint8_t *)mem->bo->map + offset;
++         return VK_SUCCESS;
++      }
++      result = device->ws->ops->buffer_unmap(mem->bo, false);
++      if (result != VK_SUCCESS)
++         return result;
+    }
+ 
+    vk_foreach_struct_const (sType, ext, pMemoryMapInfo->pNext) {
+@@ -456,8 +470,14 @@ VkResult pvr_MapMemory2(VkDevice _device,
+ 
+    /* Map it all at once */
+    result = device->ws->ops->buffer_map(mem->bo, addr);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      const int err = errno;
++
++      if (getenv("G9P_TRACE"))
++         fprintf(stderr, "g9p: vkMapMemory of %" PRIu64 " bytes failed: %s (errno %d)\n",
++                 (uint64_t)mem->bo->size, vk_Result_to_str(result), err);
+       return result;
++   }
+ 
+    *ppData = (uint8_t *)mem->bo->map + offset;
+ 
+-- 
+2.52.0
+

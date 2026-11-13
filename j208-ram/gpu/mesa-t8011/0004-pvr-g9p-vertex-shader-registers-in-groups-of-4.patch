@@ -1,0 +1,64 @@
+From 5e68015edc93d31b16489817c32194fe79ab8c94 Mon Sep 17 00:00:00 2001
+From: Leon <menghen@gmail.com>
+Date: Thu, 12 Nov 2026 18:55:56 +0700
+Subject: [PATCH] pvr/g9p: allocate vertex shader registers in groups of 4 in
+ VDM_STATE
+
+On the A10X (T8011) a draw whose vertex shader has 10 registers draws
+nothing: VDM_STATE allocated 5 units of 2. With G9P_VS_VDM_REGS raising
+that alone to 12, 14 or 16 the same draws work (raising only the kick's
+temps does not), and 8 registers have always worked. The kick's temps are
+already whole groups of 4 (usc_temps()); round VDM_STATE's allocation, and
+the MAX_INSTANCES that follows from it, up to 4 as well. Zink's GL draws
+(10 registers) work with it.
+
+Generated-by: LLM
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/imagination/vulkan/pvr_arch_g9p_gfx.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/src/imagination/vulkan/pvr_arch_g9p_gfx.c b/src/imagination/vulkan/pvr_arch_g9p_gfx.c
+index c863b56..d295aca 100644
+--- a/src/imagination/vulkan/pvr_arch_g9p_gfx.c
++++ b/src/imagination/vulkan/pvr_arch_g9p_gfx.c
+@@ -1066,6 +1066,18 @@ PVR_PER_ARCH(g9p_cmd_draw)(struct pvr_cmd_buffer *cmd_buffer,
+  * A draw's words in the control stream: VDM state (the vertex kick), the
+  * vertex shader's common-store DMA, the PPP state blocks and INDEX_LIST
+  */
++/*
++ * The vertex shader's registers as VDM_STATE allocates them: whole groups
++ * of 4, as the kick's temps (usc_temps()). On the A10X (T8011) a draw whose
++ * vertex shader got 10 (5 units of 2) drew nothing, 8, 12, 14 and 16 drew
++ * (GL run 6, G9P_VS_VDM_REGS), so round up to 4.
++ */
++static unsigned
++vs_alloc_regs(unsigned regs)
++{
++   return 4 * DIV_ROUND_UP(MAX2(regs, 8), 4);
++}
++
+ /*
+  * VDM_STATE5's MAX_INSTANCES (bits 25-29, 0 = 32): how many instances one
+  * vertex task may hold. With too many for the shader's registers the task
+@@ -1077,7 +1089,7 @@ PVR_PER_ARCH(g9p_cmd_draw)(struct pvr_cmd_buffer *cmd_buffer,
+ static uint32_t
+ vs_max_instances(unsigned regs)
+ {
+-   const unsigned allocated = 2 * DIV_ROUND_UP(MAX2(regs, 8), 2);
++   const unsigned allocated = vs_alloc_regs(regs);
+    const unsigned n = 1u << util_logbase2(MAX2(256 / allocated, 2));
+ 
+    return n >= 32 ? 0 : n;
+@@ -1198,7 +1210,7 @@ emit_draw(struct pvr_cmd_buffer *cmd_buffer, const struct pvr_g9p_graphics_state
+    {
+       const uint32_t w[4] = { 0x44002f80, state->vs_kick.code_offset, state->vs_outputs,
+                               vs_max_instances(state->vs_regs) << 25 |
+-                                 DIV_ROUND_UP(MAX2(state->vs_regs, 8), 2) << 10 | 2 << 6 | 1 };
++                                 vs_alloc_regs(state->vs_regs) / 2 << 10 | 2 << 6 | 1 };
+ 
+       emit_words(csb, w, 4);
+    }
+-- 
+2.52.0
+
